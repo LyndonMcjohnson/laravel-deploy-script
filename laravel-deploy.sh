@@ -191,6 +191,20 @@ pause() {
   read -rp "  ${1:-Press Enter to continue...} " _ || true
 }
 
+# Match a regex against a command's output WITHOUT a pipeline.
+#
+# `cmd | grep -q PATTERN` is broken under `set -o pipefail`: grep -q exits the
+# moment it matches, cmd is killed by SIGPIPE, the pipeline reports 141, and the
+# test reads as "no match" precisely when there WAS one. Capture, then match.
+out_matches() {  # out_matches REGEX CMD [ARGS...]
+  local re="$1"; shift
+  local out
+  out=$("$@" 2>/dev/null) || true
+  [[ "$out" =~ $re ]]
+}
+
+first_line() { local out; out=$("$@" 2>/dev/null) || true; printf '%s' "${out%%$'\n'*}"; }
+
 apt_install() { sudo apt-get install -y -o Dpkg::Options::=--force-confold "$@" >>"$LOG_FILE" 2>&1; }
 
 # `apt-get update` fails as a whole if any single source 404s, and a dead
@@ -360,8 +374,10 @@ log "Installing PHP $PHP_VERSION"
 
 # Is the requested version installable right now, from whatever sources are configured?
 php_available() {
-  apt-cache policy "php${PHP_VERSION}-cli" 2>/dev/null \
-    | grep -qE '^[[:space:]]*Candidate:[[:space:]]*[0-9]'
+  # Log what apt actually thinks, so a failure here is diagnosable from the log.
+  { echo "--- apt-cache policy php${PHP_VERSION}-cli ---"
+    apt-cache policy "php${PHP_VERSION}-cli" 2>&1; } >>"$LOG_FILE"
+  out_matches 'Candidate:[[:space:]]+[0-9]' apt-cache policy "php${PHP_VERSION}-cli"
 }
 
 drop_ondrej_ppa() {
@@ -446,7 +462,7 @@ ok "dir.conf updated"
 log "Installing Composer"
 if command -v composer >/dev/null; then
   sudo composer self-update >>"$LOG_FILE" 2>&1 || true
-  ok "Composer already present ($(composer --version 2>/dev/null | head -1))"
+  ok "Composer already present ($(first_line composer --version))"
 else
   tmp=$(mktemp -d)
   expected=$(curl -fsSL https://composer.github.io/installer.sig)
@@ -455,7 +471,7 @@ else
   [[ "$expected" == "$actual" ]] || die "Composer installer checksum mismatch — aborting."
   sudo php "$tmp/composer-setup.php" --install-dir=/usr/local/bin --filename=composer >>"$LOG_FILE" 2>&1
   rm -rf "$tmp"
-  ok "Composer installed ($(composer --version | head -1))"
+  ok "Composer installed ($(first_line composer --version))"
 fi
 
 # ---------------------------------------------------------------------------
@@ -500,9 +516,8 @@ if [[ "$INSTALL_MYSQL" == "yes" ]]; then
 
   # mysql_native_password is gone in MySQL 8.4+ — pick whatever this server supports.
   AUTH_PLUGIN="caching_sha2_password"
-  if sudo mysql -N -B -e \
-      "SELECT 1 FROM information_schema.PLUGINS WHERE PLUGIN_NAME='mysql_native_password' AND PLUGIN_STATUS='ACTIVE'" \
-      2>/dev/null | grep -q 1; then
+  if out_matches '1' sudo mysql -N -B -e \
+      "SELECT 1 FROM information_schema.PLUGINS WHERE PLUGIN_NAME='mysql_native_password' AND PLUGIN_STATUS='ACTIVE'"; then
     AUTH_PLUGIN="mysql_native_password"
   fi
 
@@ -548,7 +563,7 @@ fi
 
 if [[ "$CREATE_SWAP" == "yes" ]]; then
   log "Configuring swap (${SWAP_SIZE_MB}MB)"
-  if swapon --show | grep -q '/swapfile'; then
+  if out_matches '/swapfile' swapon --show; then
     ok "Swap already active"
   else
     sudo fallocate -l "${SWAP_SIZE_MB}M" /swapfile 2>>"$LOG_FILE" \
