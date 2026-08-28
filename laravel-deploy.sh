@@ -624,7 +624,85 @@ set_env DB_PASSWORD "$DB_PASSWORD" .env
 ok "Application and database values written"
 
 # ---------------------------------------------------------------------------
-# 11. Composer install + Laravel bootstrap
+# 11. PHP extensions this particular app needs
+# ---------------------------------------------------------------------------
+
+# A fixed extension list can never match every app, so read the ext-* requirements
+# out of composer.json and composer.lock (transitive deps included — pdo_sqlite
+# typically arrives via a package you never named) and install what is missing.
+log "Checking PHP extensions required by the app"
+
+# required_extensions [include_dev]
+# Dev requirements are excluded by default — otherwise a package's require-dev
+# on ext-xdebug would install a profiler onto a production box.
+required_extensions() {
+  INCLUDE_DEV="${1:-no}" php -r '
+    $dev  = getenv("INCLUDE_DEV") === "yes";
+    $keys = $dev ? ["require", "require-dev"] : ["require"];
+    $sets = $dev ? ["packages", "packages-dev"] : ["packages"];
+    $exts = [];
+    foreach (["composer.json", "composer.lock"] as $f) {
+      if (!is_file($f)) continue;
+      $j = json_decode((string) file_get_contents($f), true);
+      if (!is_array($j)) continue;
+      $blocks = [];
+      foreach ($keys as $k)
+        if (!empty($j[$k]) && is_array($j[$k])) $blocks[] = $j[$k];
+      foreach ($sets as $k)
+        if (!empty($j[$k]) && is_array($j[$k]))
+          foreach ($j[$k] as $p)
+            foreach ($keys as $rk)
+              if (!empty($p[$rk]) && is_array($p[$rk])) $blocks[] = $p[$rk];
+      foreach ($blocks as $b)
+        foreach (array_keys($b) as $name)
+          if (stripos($name, "ext-") === 0) $exts[strtolower(substr($name, 4))] = true;
+    }
+    // One per line WITH a trailing newline: without it `read` drops the last entry.
+    foreach (array_keys($exts) as $e) echo $e, "\n";
+  ' 2>/dev/null
+}
+
+# Map a PHP extension name to the apt package that ships it. Returning 1 means
+# "compiled in or part of the base package" — nothing to install.
+apt_pkg_for_ext() {
+  case "$1" in
+    core|standard|spl|date|json|ctype|tokenizer|fileinfo|filter|hash|pcre|random|reflection|session|pdo) return 1 ;;
+    openssl|zlib|libxml|iconv|phar|pcntl|posix|sodium|calendar|exif|ffi|ftp|gettext|shmop|sockets|sysvmsg|sysvsem|sysvshm) return 1 ;;
+    pdo_sqlite|sqlite|sqlite3)          echo "php${PHP_VERSION}-sqlite3" ;;
+    pdo_mysql|mysqli|mysqlnd)           echo "php${PHP_VERSION}-mysql" ;;
+    pdo_pgsql|pgsql)                    echo "php${PHP_VERSION}-pgsql" ;;
+    dom|simplexml|xml|xmlreader|xmlwriter|xsl) echo "php${PHP_VERSION}-xml" ;;
+    *)                                  echo "php${PHP_VERSION}-$1" ;;
+  esac
+}
+
+MISSING_EXT_PKGS=()
+UNAVAILABLE_EXTS=()
+while read -r ext || [[ -n "$ext" ]]; do
+  [[ -n "$ext" ]] || continue
+  php -r "exit(extension_loaded('$ext') ? 0 : 1);" 2>/dev/null && continue
+  pkg=$(apt_pkg_for_ext "$ext") || continue
+  if out_matches 'Candidate:[[:space:]]+[0-9]' apt-cache policy "$pkg"; then
+    MISSING_EXT_PKGS+=("$pkg")
+  else
+    UNAVAILABLE_EXTS+=("$ext")
+  fi
+done < <(required_extensions "$( [[ "$COMPOSER_NO_DEV" == "yes" ]] && echo no || echo yes )")
+
+if [[ ${#MISSING_EXT_PKGS[@]} -gt 0 ]]; then
+  # shellcheck disable=SC2207
+  MISSING_EXT_PKGS=($(printf '%s\n' "${MISSING_EXT_PKGS[@]}" | sort -u))
+  info "Installing: ${MISSING_EXT_PKGS[*]}"
+  apt_install "${MISSING_EXT_PKGS[@]}"
+  ok "Extensions installed"
+else
+  ok "All required extensions already present"
+fi
+[[ ${#UNAVAILABLE_EXTS[@]} -eq 0 ]] || \
+  warn "No apt package found for: ${UNAVAILABLE_EXTS[*]} — composer may refuse to install"
+
+# ---------------------------------------------------------------------------
+# 12. Composer install + Laravel bootstrap
 # ---------------------------------------------------------------------------
 
 log "Installing PHP dependencies"
