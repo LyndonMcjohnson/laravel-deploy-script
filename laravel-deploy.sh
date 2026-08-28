@@ -207,11 +207,25 @@ printf '%s\n' "${C_BOLD}Laravel server provisioner${C_RESET}  —  log: $LOG_FIL
 echo
 
 log "Checking sudo access"
-sudo -v || die "sudo authentication failed."
-# keep sudo alive for the whole run
-( while true; do sudo -n true; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) 2>/dev/null &
-SUDO_KEEPALIVE_PID=$!
-trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
+# Probe with `sudo -n true` rather than `sudo -v`: on a passwordless-sudo host
+# (the usual cloud-image setup, and sudo-rs on recent Ubuntu) `sudo -v` still
+# prompts for a password the account may not even have.
+if sudo -n true 2>/dev/null; then
+  SUDO_NEEDS_PASSWORD="no"
+  ok "Passwordless sudo available"
+else
+  SUDO_NEEDS_PASSWORD="yes"
+  info "sudo wants your Linux account password — not your SSH key passphrase."
+  sudo -v || die "sudo authentication failed."
+  ok "sudo authenticated"
+fi
+
+# Only worth a keepalive when there is a timestamp that can expire mid-run.
+if [[ "$SUDO_NEEDS_PASSWORD" == "yes" ]]; then
+  ( while kill -0 "$$" 2>/dev/null; do sudo -n true 2>/dev/null || true; sleep 50; done ) &
+  SUDO_KEEPALIVE_PID=$!
+fi
+trap 'kill "${SUDO_KEEPALIVE_PID:-}" 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # Gather answers
