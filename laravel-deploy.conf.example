@@ -1,0 +1,49 @@
+# laravel-deploy.conf — every value is optional; anything left blank is prompted for.
+# Booleans accept: yes/no, y/n, true/false, 1/0.
+#
+# WARNING: a filled-in copy of this file contains database passwords.
+# Keep it out of version control (the shipped .gitignore already excludes
+# laravel-deploy.conf) and chmod 600 it on the server.
+
+# --- PHP / Apache -----------------------------------------------------------
+PHP_VERSION=8.4
+INSTALL_NODE=no
+NODE_MAJOR=22
+
+# --- Application ------------------------------------------------------------
+WEB_ROOT=/var/www/html
+REPO_URL=https://github.com/username/reponame.git
+APP_DIR_NAME=                 # defaults to the repo name
+GIT_BRANCH=                   # blank = repo default branch
+COMPOSER_NO_DEV=yes           # yes = composer install --no-dev --optimize-autoloader
+RUN_MIGRATIONS=no
+RUN_STORAGE_LINK=yes
+
+# --- Git identity / SSH key -------------------------------------------------
+GIT_USER_EMAIL=you@example.com
+GIT_USER_NAME=Your Name
+GENERATE_SSH_KEY=yes
+
+# --- .env -------------------------------------------------------------------
+APP_NAME=Laravel
+APP_ENV=production
+APP_DEBUG=false
+APP_URL=https://example.com
+EDIT_ENV_AFTER=yes            # open $EDITOR on .env at the end for a final review
+
+# --- Database ---------------------------------------------------------------
+INSTALL_MYSQL=yes
+MYSQL_ROOT_PASSWORD=          # blank = generated and printed at the end
+DB_DATABASE=laravel
+DB_USERNAME=laravel
+DB_PASSWORD=                  # blank = generated and printed at the end
+INSTALL_PHPMYADMIN=no
+
+# --- Swap -------------------------------------------------------------------
+CREATE_SWAP=yes
+SWAP_SIZE_MB=2048
+
+# --- TLS --------------------------------------------------------------------
+INSTALL_SSL=yes
+SSL_DOMAINS=example.com,www.example.com   # comma separated; a *.domain entry switches to DNS challenge
+SSL_EMAIL=you@example.com

@@ -1,0 +1,21 @@
+# A filled-in config holds real database passwords — never commit it.
+laravel-deploy.conf
+*.conf
+!*.conf.example
+
+# Run logs (the script writes to /tmp, but just in case)
+laravel-deploy-*.log
+*.log
+
+# Keys — should never be in here, but belt and braces
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
