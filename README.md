@@ -13,7 +13,7 @@ are detected and skipped rather than clobbered.
 - Ubuntu (tested on 24.04 and 26.04). PHP comes from the distro repos when they
   carry the version you asked for, otherwise from `ppa:ondrej/php`, otherwise
   from `packages.sury.org` — the PPA has no builds from 25.10 onward.
-- A non-root user with `sudo` rights
+- A non-root user with `sudo` rights — or root plus `--bootstrap-user` (below)
 - A Laravel repo containing a `.env.example`
 
 ## Usage
@@ -27,6 +27,27 @@ chmod +x laravel-deploy.sh
 Run it as your normal user. **Do not** run it with `sudo ./laravel-deploy.sh` —
 it calls `sudo` itself where it needs to, and running the whole thing as root
 would leave your app files owned by root.
+
+### Servers where root is the only account
+
+Many images (Hetzner, OVH, plain Debian) give you root and nothing else. Running
+the whole provision as root would leave every application file root-owned, so
+the script refuses. Instead, as root:
+
+```bash
+./laravel-deploy.sh --bootstrap-user deploy
+```
+
+That creates `deploy`, adds it to `sudo` with a validated `NOPASSWD` rule, copies
+`/root/.ssh/authorized_keys` across so the key you are already using works for
+the new account, and re-executes itself as that user. A `-c` config is copied to
+the new user's home at mode 600, since root's home is normally unreadable to
+anyone else. Re-running it is harmless if the user already exists.
+
+If sshd is configured to require a password *as well as* a key
+(`AuthenticationMethods publickey,password`), the new account is created with no
+password and could not log in, so the script offers to set one while you still
+have a root shell.
 
 ### Unattended runs
 
@@ -46,6 +67,7 @@ a hard error. A filled-in config contains database passwords — it's in
 | `-c, --config FILE` | Read answers from `FILE` (defaults to `./laravel-deploy.conf` if present) |
 | `-y, --yes` | Never prompt; fail on a missing required value |
 | `--dump-config` | Print a commented config template and exit |
+| `--bootstrap-user NAME` | As root: create `NAME`, give it root's SSH key and passwordless sudo, then re-run as it |
 | `-h, --help` | Usage |
 
 ## What it does, in order

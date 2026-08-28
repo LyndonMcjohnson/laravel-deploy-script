@@ -10,8 +10,10 @@
 #   ./laravel-deploy.sh -c deploy.conf     # read answers from a config file
 #   ./laravel-deploy.sh -c deploy.conf -y  # non-interactive (fails on missing required values)
 #   ./laravel-deploy.sh --dump-config      # print a config template and exit
+#   ./laravel-deploy.sh --bootstrap-user deploy   # as root: create that user and re-run as them
 #
 # Run as a normal user with sudo rights. Do NOT run with `sudo ./laravel-deploy.sh`.
+# On a root-only server use --bootstrap-user; see below.
 #
 set -Eeuo pipefail
 
@@ -37,15 +39,19 @@ die()   { printf '%s\n' "${C_RED}  ✗ $*${C_RESET}" >&2; exit 1; }
 trap 'die "Failed at line $LINENO. Full log: $LOG_FILE"' ERR
 
 usage() {
-  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
+BOOTSTRAP_USER=""
+REEXEC_ARGS=()   # the arguments to carry across a re-exec as the new user
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -c|--config)      CONFIG_FILE="${2:-}"; shift 2 ;;
-    -y|--yes|--non-interactive) NON_INTERACTIVE="yes"; shift ;;
+    -c|--config)      CONFIG_FILE="${2:-}"; REEXEC_ARGS+=("$1" "${2:-}"); shift 2 ;;
+    -y|--yes|--non-interactive) NON_INTERACTIVE="yes"; REEXEC_ARGS+=("$1"); shift ;;
     --dump-config)    DUMP_CONFIG="yes"; shift ;;
+    --bootstrap-user) BOOTSTRAP_USER="${2:-}"; shift 2 ;;   # deliberately not carried over
     -h|--help)        usage ;;
     *) die "Unknown option: $1 (try --help)" ;;
   esac
@@ -299,7 +305,99 @@ set_env() {
 # Preflight
 # ---------------------------------------------------------------------------
 
-[[ $EUID -ne 0 ]] || die "Run this as a normal user with sudo rights, not as root."
+# On a root-only server (many Hetzner/OVH/Debian images ship with no other
+# account) create the deploy user, hand it root's SSH key and passwordless sudo,
+# then re-run as that user. Running the whole provision as root would leave every
+# app file root-owned, which is why the script refuses to continue otherwise.
+bootstrap_user() {
+  local u="$1" home ssh_needs_password="no"
+
+  [[ "$u" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "Invalid username: '$u'"
+  [[ "$u" != "root" ]] || die "--bootstrap-user needs a non-root name."
+
+  # Minimal images often have no sudo at all.
+  command -v sudo >/dev/null 2>&1 || {
+    log "Installing sudo"
+    apt-get update >>"$LOG_FILE" 2>&1 || true
+    apt-get install -y sudo >>"$LOG_FILE" 2>&1 || die "Could not install sudo."
+  }
+
+  log "Preparing deploy user '$u'"
+  if id -u "$u" >/dev/null 2>&1; then
+    ok "User $u already exists"
+  else
+    adduser --disabled-password --gecos "" "$u" >>"$LOG_FILE" 2>&1
+    ok "Created $u"
+  fi
+  usermod -aG sudo "$u" >>"$LOG_FILE" 2>&1
+
+  # Passwordless sudo, validated before it is trusted: a malformed file here can
+  # lock sudo for everyone.
+  printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$u" > "/etc/sudoers.d/90-$u"
+  chmod 440 "/etc/sudoers.d/90-$u"
+  visudo -cf "/etc/sudoers.d/90-$u" >>"$LOG_FILE" 2>&1 \
+    || { rm -f "/etc/sudoers.d/90-$u"; die "Generated sudoers file was rejected; nothing changed."; }
+  ok "Passwordless sudo granted to $u"
+
+  home=$(getent passwd "$u" | cut -d: -f6)
+  [[ -n "$home" && -d "$home" ]] || die "Could not determine home directory for $u."
+
+  if [[ -s /root/.ssh/authorized_keys ]]; then
+    install -d -m 700 -o "$u" -g "$u" "$home/.ssh"
+    install -m 600 -o "$u" -g "$u" /root/.ssh/authorized_keys "$home/.ssh/authorized_keys"
+    ok "Copied root's authorized_keys to $u — the key you are using now works for $u"
+  else
+    warn "No /root/.ssh/authorized_keys found. Add a key for $u before you log out,"
+    warn "or you may not be able to get back in as this user."
+  fi
+
+  # If sshd demands a password as well as a key, a --disabled-password account
+  # cannot log in at all. Offer to set one while there is still a root shell.
+  if out_matches 'password' sudo sshd -T 2>/dev/null \
+     || out_matches 'authenticationmethods.*password' sshd -T; then
+    ssh_needs_password="yes"
+  fi
+  if [[ "$ssh_needs_password" == "yes" && "$NON_INTERACTIVE" != "yes" ]]; then
+    info "This server's sshd appears to require a password in addition to a key."
+    info "Set one for $u now, or $u will not be able to log in over SSH."
+    passwd "$u" || warn "Password not set — you can run 'passwd $u' later as root."
+  fi
+
+  # Re-exec as the new user. Root's home is typically 0700, so the script (and
+  # any config) has to be copied somewhere the new user can actually read.
+  local script dest
+  script=$(readlink -f "$0")
+  dest="$home/$(basename "$script")"
+  install -m 755 -o "$u" -g "$u" "$script" "$dest"
+
+  if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+    local cfg_dest
+    cfg_dest="$home/$(basename "$CONFIG_FILE")"
+    install -m 600 -o "$u" -g "$u" "$CONFIG_FILE" "$cfg_dest"
+    # Point the re-exec at the copy, not root's unreadable original.
+    local i
+    for i in "${!REEXEC_ARGS[@]}"; do
+      [[ "${REEXEC_ARGS[$i]}" == "$CONFIG_FILE" ]] && REEXEC_ARGS[$i]="$cfg_dest"
+    done
+    ok "Config copied to $cfg_dest (mode 600)"
+  fi
+
+  ok "Re-running as $u"
+  echo
+  cd "$home"
+  exec sudo -u "$u" -H -- "$dest" "${REEXEC_ARGS[@]+"${REEXEC_ARGS[@]}"}"
+}
+
+if [[ $EUID -eq 0 ]]; then
+  if [[ -n "$BOOTSTRAP_USER" ]]; then
+    bootstrap_user "$BOOTSTRAP_USER"    # execs; never returns
+  fi
+  die "Running as root would leave every app file root-owned.
+    On a server where root is the only account, let this script create one:
+      ./laravel-deploy.sh --bootstrap-user deploy
+    It copies root's SSH key to the new user, grants passwordless sudo,
+    and re-runs itself as that user."
+fi
 command -v sudo >/dev/null || die "sudo is required."
 [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release."
 # shellcheck disable=SC1091
