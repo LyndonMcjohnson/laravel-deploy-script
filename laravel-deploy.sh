@@ -344,6 +344,24 @@ PRIMARY_DOMAIN=$(printf '%s' "${SSL_DOMAINS:-}" | cut -d, -f1)
 [[ -z "$PRIMARY_DOMAIN" ]] && PRIMARY_DOMAIN=$(printf '%s' "$APP_URL" | sed -E 's#^https?://##; s#/.*$##')
 [[ -z "$PRIMARY_DOMAIN" ]] && PRIMARY_DOMAIN="localhost"
 
+# A config file copied from --dump-config and only half filled in produces a
+# vhost and a certificate for example.com. Nothing fails until certbot offers
+# the wrong names, long after the unattended part of the run is over, so refuse
+# the exact template values up front. Exact matches only — a substring test
+# would reject a real deployment of a domain that merely contains one of these.
+check_placeholder() {
+  local var="$1" template="$2"
+  [[ "${!var:-}" != "$template" ]] || \
+    die "$var is still the template value ('$template'). Edit your config (or answer the prompt) before running."
+}
+check_placeholder APP_URL        "https://example.com"
+check_placeholder REPO_URL       "https://github.com/username/reponame.git"
+check_placeholder GIT_USER_EMAIL "you@example.com"
+if [[ "$INSTALL_SSL" == "yes" ]]; then
+  check_placeholder SSL_DOMAINS  "example.com,www.example.com"
+  check_placeholder SSL_EMAIL    "you@example.com"
+fi
+
 echo
 info "PHP $PHP_VERSION · app at $APP_DIR · ServerName $PRIMARY_DOMAIN"
 info "MySQL: $INSTALL_MYSQL · phpMyAdmin: $INSTALL_PHPMYADMIN · Node: $INSTALL_NODE · swap: $CREATE_SWAP · SSL: $INSTALL_SSL"
@@ -828,6 +846,20 @@ if [[ "$INSTALL_SSL" == "yes" ]]; then
   sudo snap install --classic certbot >>"$LOG_FILE" 2>&1
   sudo ln -sf /snap/bin/certbot /usr/bin/certbot
   ok "certbot installed"
+
+  # Let's Encrypt's HTTP-01 challenge needs the name pointing here already, and
+  # failed attempts count against the account's rate limit.
+  SERVER_IP=$(first_line curl -fsS --max-time 10 https://api.ipify.org)
+  for d in ${SSL_DOMAINS//,/ }; do
+    [[ "$d" == \** ]] && continue
+    resolved=$(first_line getent ahostsv4 "$d")
+    resolved="${resolved%% *}"
+    if [[ -z "$resolved" ]]; then
+      warn "$d does not resolve yet — certbot will fail for it"
+    elif [[ -n "$SERVER_IP" && "$resolved" != "$SERVER_IP" ]]; then
+      warn "$d resolves to $resolved, but this server is $SERVER_IP"
+    fi
+  done
 
   CERT_ARGS=()
   for d in ${SSL_DOMAINS//,/ }; do CERT_ARGS+=(-d "$d"); done
