@@ -179,6 +179,22 @@ pause() {
 
 apt_install() { sudo apt-get install -y -o Dpkg::Options::=--force-confold "$@" >>"$LOG_FILE" 2>&1; }
 
+# `apt-get update` fails as a whole if any single source 404s, and a dead
+# third-party PHP source would then break every apt call for the rest of the
+# run. Drop it and retry rather than aborting.
+apt_update() {
+  if sudo apt-get update >>"$LOG_FILE" 2>&1; then return 0; fi
+  if grep -rqs "ondrej/php" /etc/apt/sources.list.d/ 2>/dev/null; then
+    warn "The ondrej/php apt source has no build for this release — removing it"
+    sudo add-apt-repository -y --remove ppa:ondrej/php >>"$LOG_FILE" 2>&1 || true
+    sudo rm -f /etc/apt/sources.list.d/ondrej-*.list \
+               /etc/apt/sources.list.d/ondrej-*.sources 2>/dev/null || true
+    sudo apt-get update >>"$LOG_FILE" 2>&1 && return 0
+  fi
+  warn "Some apt sources failed to refresh — continuing (details in $LOG_FILE)"
+  return 0
+}
+
 # Set/replace a key in a .env-style file, handling commented-out and missing keys.
 set_env() {
   local key="$1" val="$2" file="$3" esc
@@ -307,7 +323,7 @@ pause "Press Enter to start provisioning (Ctrl-C to abort)..."
 # ---------------------------------------------------------------------------
 
 log "Updating package lists"
-sudo apt-get update >>"$LOG_FILE" 2>&1
+apt_update
 apt_install software-properties-common ca-certificates curl gnupg lsb-release unzip git
 ok "Base packages installed"
 
@@ -325,9 +341,61 @@ ok "Apache installed, mod_rewrite enabled"
 # ---------------------------------------------------------------------------
 
 log "Installing PHP $PHP_VERSION"
-if ! grep -rq "ondrej/php" /etc/apt/sources.list.d/ 2>/dev/null; then
-  sudo add-apt-repository -y ppa:ondrej/php >>"$LOG_FILE" 2>&1
-  sudo apt-get update >>"$LOG_FILE" 2>&1
+
+# Is the requested version installable right now, from whatever sources are configured?
+php_available() {
+  apt-cache policy "php${PHP_VERSION}-cli" 2>/dev/null \
+    | grep -qE '^[[:space:]]*Candidate:[[:space:]]*[0-9]'
+}
+
+drop_ondrej_ppa() {
+  sudo add-apt-repository -y --remove ppa:ondrej/php >>"$LOG_FILE" 2>&1 || true
+  sudo rm -f /etc/apt/sources.list.d/ondrej-*.list \
+             /etc/apt/sources.list.d/ondrej-*.sources >>"$LOG_FILE" 2>&1 || true
+}
+
+add_ondrej_ppa() {
+  info "Trying the ondrej/php PPA"
+  sudo add-apt-repository -y ppa:ondrej/php >>"$LOG_FILE" 2>&1 || return 1
+  # A PPA with no build for this release 404s here; that is not fatal, we just check below.
+  apt_update
+  php_available
+}
+
+add_sury_repo() {
+  info "Trying packages.sury.org"
+  apt_install apt-transport-https ca-certificates curl gnupg || return 1
+  curl -fsSL https://packages.sury.org/php/apt.gpg \
+    | sudo gpg --dearmor -o /usr/share/keyrings/deb.sury.org-php.gpg 2>>"$LOG_FILE" || return 1
+  echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${PHP_REPO_CODENAME} main" \
+    | sudo tee /etc/apt/sources.list.d/sury-php.list >/dev/null
+  apt_update
+  php_available
+}
+
+PHP_REPO_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+
+if php_available; then
+  ok "php${PHP_VERSION} is in the distribution repositories — no third-party repo needed"
+elif add_ondrej_ppa; then
+  ok "php${PHP_VERSION} available via ondrej/php"
+else
+  # The PPA has no build for this release (it 404s from Ubuntu 25.10 "questing"
+  # onward, where upstream has moved to sury). Clear it out before trying sury,
+  # or its dead source keeps breaking every later apt-get update.
+  drop_ondrej_ppa
+  if [[ -z "$PHP_REPO_CODENAME" ]]; then
+    die "Cannot determine the release codename; add a PHP repository manually."
+  fi
+  if add_sury_repo; then
+    ok "php${PHP_VERSION} available via packages.sury.org"
+  else
+    warn "php${PHP_VERSION} is not installable from the distro, ondrej/php, or sury."
+    info "Versions this server can currently install:"
+    apt-cache search --names-only '^php[0-9]+\.[0-9]+-cli$' 2>/dev/null \
+      | sed -E 's/^php([0-9]+\.[0-9]+)-cli.*/      \1/' | sort -u || true
+    die "Pick one of the versions above and re-run."
+  fi
 fi
 
 PHP_PKGS=(
