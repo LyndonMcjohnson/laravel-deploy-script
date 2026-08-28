@@ -77,6 +77,7 @@ GIT_BRANCH=                   # blank = repo default branch
 COMPOSER_NO_DEV=yes           # yes = composer install --no-dev --optimize-autoloader
 RUN_MIGRATIONS=no
 RUN_STORAGE_LINK=yes
+BUILD_ASSETS=yes             # npm ci + npm run build when the repo has a package.json
 
 # --- Git identity / SSH key -------------------------------------------------
 GIT_USER_EMAIL=you@example.com
@@ -336,6 +337,7 @@ fi
 ask_yn   COMPOSER_NO_DEV   "composer install without dev dependencies" "$( [[ "$APP_ENV" == "production" ]] && echo y || echo n )"
 ask_yn   RUN_MIGRATIONS    "Run php artisan migrate --force after install" "n"
 ask_yn   RUN_STORAGE_LINK  "Run php artisan storage:link" "y"
+ask_yn   BUILD_ASSETS      "Build front-end assets with npm if the repo has a package.json" "y"
 
 APP_DIR="${WEB_ROOT%/}/${APP_DIR_NAME}"
 PRIMARY_DOMAIN=$(printf '%s' "${SSL_DOMAINS:-}" | cut -d, -f1)
@@ -550,11 +552,15 @@ fi
 # 7. Node.js
 # ---------------------------------------------------------------------------
 
-if [[ "$INSTALL_NODE" == "yes" ]]; then
+install_node() {
   log "Installing Node.js ${NODE_MAJOR}.x"
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | sudo -E bash - >>"$LOG_FILE" 2>&1
   apt_install nodejs
   ok "Node $(node -v), npm $(npm -v)"
+}
+
+if [[ "$INSTALL_NODE" == "yes" ]]; then
+  install_node
 fi
 
 # ---------------------------------------------------------------------------
@@ -713,6 +719,48 @@ COMPOSER_ALLOW_SUPERUSER=0 composer "${COMPOSER_ARGS[@]}" 2>&1 | tee -a "$LOG_FI
 if ! grep -qE '^APP_KEY=.+' .env; then
   php artisan key:generate --force >>"$LOG_FILE" 2>&1
   ok "APP_KEY generated"
+fi
+
+# --- Front-end assets ------------------------------------------------------
+# A Laravel app with a package.json almost certainly builds its CSS/JS with Vite
+# or Mix. Skipping this leaves no public/build/manifest.json, and every page dies
+# with "Unable to locate file in Vite manifest" — a broken deploy that looks like
+# a PHP problem. Runs before the permissions pass so public/build is covered.
+
+if [[ "$BUILD_ASSETS" == "yes" && -f package.json ]]; then
+  if ! command -v npm >/dev/null 2>&1; then
+    info "package.json found but Node is not installed — installing it to build assets"
+    install_node
+  fi
+
+  log "Building front-end assets"
+  if [[ -f package-lock.json ]]; then
+    npm ci 2>&1 | tee -a "$LOG_FILE" | tail -3
+  else
+    npm install 2>&1 | tee -a "$LOG_FILE" | tail -3
+  fi
+  ok "npm dependencies installed"
+
+  npm_script_exists() {
+    php -r '
+      $j = json_decode((string) file_get_contents("package.json"), true);
+      exit(!empty($j["scripts"][$argv[1]]) ? 0 : 1);
+    ' "$1" 2>/dev/null
+  }
+
+  NPM_BUILD_SCRIPT=""
+  for s in build production prod; do
+    if npm_script_exists "$s"; then NPM_BUILD_SCRIPT="$s"; break; fi
+  done
+
+  if [[ -n "$NPM_BUILD_SCRIPT" ]]; then
+    npm run "$NPM_BUILD_SCRIPT" 2>&1 | tee -a "$LOG_FILE" | tail -5
+    ok "Assets built (npm run $NPM_BUILD_SCRIPT)"
+  else
+    warn "No build/production/prod script in package.json — nothing to build"
+  fi
+elif [[ -f package.json ]]; then
+  warn "package.json found but BUILD_ASSETS=no — remember to build assets yourself"
 fi
 
 log "Setting permissions"

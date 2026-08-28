@@ -10,8 +10,9 @@ are detected and skipped rather than clobbered.
 
 ## Requirements
 
-- Ubuntu (tested on 22.04 and 24.04; other Debian derivatives will likely work
-  but the PHP packages come from the `ppa:ondrej/php` PPA, which is Ubuntu-only)
+- Ubuntu (tested on 24.04 and 26.04). PHP comes from the distro repos when they
+  carry the version you asked for, otherwise from `ppa:ondrej/php`, otherwise
+  from `packages.sury.org` — the PPA has no builds from 25.10 onward.
 - A non-root user with `sudo` rights
 - A Laravel repo containing a `.env.example`
 
@@ -51,9 +52,11 @@ a hard error. A filled-in config contains database passwords — it's in
 
 1. `apt-get update` and base packages
 2. Apache, with `mod_rewrite` and `mod_headers`
-3. PHP from `ppa:ondrej/php` with the extensions Laravel needs, set as both the
-   CLI default and the only enabled Apache PHP module; `index.php` moved to the
-   front of `DirectoryIndex`
+3. PHP from the first source that has your version — distro repos, then
+   `ppa:ondrej/php`, then `packages.sury.org` — set as both the CLI default and
+   the only enabled Apache PHP module; `index.php` moved to the front of
+   `DirectoryIndex`. A dead PHP apt source from an earlier attempt is removed
+   rather than left to break every later `apt-get update`.
 4. Composer, installed to `/usr/local/bin/composer` and verified against the
    official SHA-384 signature
 5. Git identity, plus an ed25519 SSH key — the public key is printed in full, and
@@ -66,13 +69,18 @@ a hard error. A filled-in config contains database passwords — it's in
 10. `git clone` into the web root — or `git pull` if the repo is already there
 11. `.env` from `.env.example`, with app and database values filled in; an
     existing `.env` is backed up before it's touched
-12. `composer install`, `php artisan key:generate`, permissions, and optionally
+12. PHP extensions the app actually declares — `ext-*` is read out of
+    `composer.json` and `composer.lock`, including transitive requires, and the
+    matching apt packages are installed
+13. `composer install`, `php artisan key:generate`, then `npm ci` and
+    `npm run build` when the repo has a `package.json` (Node is installed
+    automatically if it isn't already), permissions, and optionally
     `storage:link` and `migrate --force`
-13. A dedicated Apache virtual host pointed at `public/`, config-tested before
+14. A dedicated Apache virtual host pointed at `public/`, config-tested before
     the restart
-14. certbot via snap and a certificate (optional), including the manual DNS
+15. certbot via snap and a certificate (optional), including the manual DNS
     challenge path for wildcard domains
-15. Production config/route/view caches, and a summary of every generated
+16. Production config/route/view caches, and a summary of every generated
     credential
 
 Verbose output goes to `/tmp/laravel-deploy-<timestamp>.log`; the console shows
@@ -92,6 +100,11 @@ only the step checklist.
 - **Virtual host.** A dedicated file in `sites-available` with `AllowOverride
   All` scoped to the app's `public/` directory, rather than editing
   `000-default.conf` or loosening `apache2.conf` globally.
+- **Asset builds.** A Laravel app with a `package.json` gets `npm ci` (or
+  `npm install`) and its `build` / `production` / `prod` script run before the
+  permissions pass. Without it there is no `public/build/manifest.json` and a
+  Vite app answers every request with "Unable to locate file in Vite manifest",
+  which reads like a PHP fault. Set `BUILD_ASSETS=no` to skip.
 - **Generated passwords.** Blank password prompts generate 24 alphanumeric
   characters and print them once, in the closing summary. Save them then.
 
