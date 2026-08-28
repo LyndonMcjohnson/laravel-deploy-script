@@ -1,5 +1,6 @@
 # laravel-deploy.conf — every value is optional; anything left blank is prompted for.
 # Booleans accept: yes/no, y/n, true/false, 1/0.
+# This file is sourced as shell: QUOTE any value containing a space or #.
 #
 # WARNING: a filled-in copy of this file contains database passwords.
 # Keep it out of version control (the shipped .gitignore already excludes
@@ -22,23 +23,32 @@ BUILD_ASSETS=yes             # npm ci + npm run build when the repo has a packag
 
 # --- Git identity / SSH key -------------------------------------------------
 GIT_USER_EMAIL=you@example.com
-GIT_USER_NAME=Your Name
+GIT_USER_NAME="Your Name"
 GENERATE_SSH_KEY=yes
 
 # --- .env -------------------------------------------------------------------
-APP_NAME=Laravel
+APP_NAME="Laravel"
 APP_ENV=production
 APP_DEBUG=false
 APP_URL=https://example.com
 EDIT_ENV_AFTER=yes            # open $EDITOR on .env at the end for a final review
 
 # --- Database ---------------------------------------------------------------
-INSTALL_MYSQL=yes
-MYSQL_ROOT_PASSWORD=          # blank = generated and printed at the end
-DB_DATABASE=laravel
+# Either set DATABASE_URL, or set the DB_* parameters below. Laravel reads
+# DATABASE_URL first and ignores the individual keys when it is present, so
+# filling in both leaves two sources of truth that can disagree.
+USE_DATABASE_URL=no
+DATABASE_URL=                 # driver://user:password@host:port/database
+
+DB_CONNECTION=mysql           # mysql | mariadb | pgsql | sqlite
+INSTALL_DB_SERVER=yes         # install the server locally; no = point at an existing host
+DB_HOST=127.0.0.1             # hostname or IP of the database server
+DB_PORT=                      # blank = the driver default (mysql 3306, pgsql 5432)
+DB_DATABASE=laravel           # for sqlite: an absolute path to the .sqlite file
 DB_USERNAME=laravel
-DB_PASSWORD=                  # blank = generated and printed at the end
-INSTALL_PHPMYADMIN=no
+DB_PASSWORD=                  # generated when INSTALL_DB_SERVER=yes; required otherwise
+MYSQL_ROOT_PASSWORD=          # mysql/mariadb only; blank = generated and printed at the end
+INSTALL_PHPMYADMIN=no         # mysql/mariadb only
 
 # --- Swap -------------------------------------------------------------------
 CREATE_SWAP=yes

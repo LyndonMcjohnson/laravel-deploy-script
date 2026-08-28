@@ -59,6 +59,7 @@ dump_config() {
 cat <<'CONF'
 # laravel-deploy.conf — every value is optional; anything left blank is prompted for.
 # Booleans accept: yes/no, y/n, true/false, 1/0.
+# This file is sourced as shell: QUOTE any value containing a space or #.
 #
 # WARNING: a filled-in copy of this file contains database passwords.
 # Keep it out of version control (the shipped .gitignore already excludes
@@ -81,23 +82,32 @@ BUILD_ASSETS=yes             # npm ci + npm run build when the repo has a packag
 
 # --- Git identity / SSH key -------------------------------------------------
 GIT_USER_EMAIL=you@example.com
-GIT_USER_NAME=Your Name
+GIT_USER_NAME="Your Name"
 GENERATE_SSH_KEY=yes
 
 # --- .env -------------------------------------------------------------------
-APP_NAME=Laravel
+APP_NAME="Laravel"
 APP_ENV=production
 APP_DEBUG=false
 APP_URL=https://example.com
 EDIT_ENV_AFTER=yes            # open $EDITOR on .env at the end for a final review
 
 # --- Database ---------------------------------------------------------------
-INSTALL_MYSQL=yes
-MYSQL_ROOT_PASSWORD=          # blank = generated and printed at the end
-DB_DATABASE=laravel
+# Either set DATABASE_URL, or set the DB_* parameters below. Laravel reads
+# DATABASE_URL first and ignores the individual keys when it is present, so
+# filling in both leaves two sources of truth that can disagree.
+USE_DATABASE_URL=no
+DATABASE_URL=                 # driver://user:password@host:port/database
+
+DB_CONNECTION=mysql           # mysql | mariadb | pgsql | sqlite
+INSTALL_DB_SERVER=yes         # install the server locally; no = point at an existing host
+DB_HOST=127.0.0.1             # hostname or IP of the database server
+DB_PORT=                      # blank = the driver default (mysql 3306, pgsql 5432)
+DB_DATABASE=laravel           # for sqlite: an absolute path to the .sqlite file
 DB_USERNAME=laravel
-DB_PASSWORD=                  # blank = generated and printed at the end
-INSTALL_PHPMYADMIN=no
+DB_PASSWORD=                  # generated when INSTALL_DB_SERVER=yes; required otherwise
+MYSQL_ROOT_PASSWORD=          # mysql/mariadb only; blank = generated and printed at the end
+INSTALL_PHPMYADMIN=no         # mysql/mariadb only
 
 # --- Swap -------------------------------------------------------------------
 CREATE_SWAP=yes
@@ -119,6 +129,10 @@ if [[ -n "$CONFIG_FILE" ]]; then
   [[ -f "$CONFIG_FILE" ]] || die "Config file not found: $CONFIG_FILE"
   # shellcheck disable=SC1090
   set -a; source "$CONFIG_FILE"; set +a
+  # Configs written before multi-driver support say INSTALL_MYSQL; honour it.
+  if [[ -z "${INSTALL_DB_SERVER:-}" && -n "${INSTALL_MYSQL:-}" ]]; then
+    INSTALL_DB_SERVER="$INSTALL_MYSQL"
+  fi
   ok "Loaded config from $CONFIG_FILE"
 fi
 
@@ -206,6 +220,42 @@ out_matches() {  # out_matches REGEX CMD [ARGS...]
 
 first_line() { local out; out=$("$@" 2>/dev/null) || true; printf '%s' "${out%%$'\n'*}"; }
 
+# --- Database driver helpers -----------------------------------------------
+
+# Laravel's driver names, from the aliases people actually type or that appear
+# as connection-string schemes.
+normalise_driver() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    mysql|mysqli)                      echo mysql ;;
+    mariadb)                           echo mariadb ;;
+    pgsql|postgres|postgresql|psql)    echo pgsql ;;
+    sqlite|sqlite3)                    echo sqlite ;;
+    sqlsrv|mssql)                      echo sqlsrv ;;
+    *)                                 printf '%s' "$1" ;;
+  esac
+}
+
+default_db_port() {
+  case "$1" in
+    mysql|mariadb) echo 3306 ;;
+    pgsql)         echo 5432 ;;
+    sqlsrv)        echo 1433 ;;
+    *)             echo "" ;;
+  esac
+}
+
+url_scheme() { printf '%s' "${1%%://*}"; }
+
+# The apt package providing the PDO driver for a given Laravel connection.
+php_driver_pkg() {
+  case "$1" in
+    mysql|mariadb) echo "php${PHP_VERSION}-mysql" ;;
+    pgsql)         echo "php${PHP_VERSION}-pgsql" ;;
+    sqlite)        echo "php${PHP_VERSION}-sqlite3" ;;
+    *)             return 1 ;;
+  esac
+}
+
 apt_install() { sudo apt-get install -y -o Dpkg::Options::=--force-confold "$@" >>"$LOG_FILE" 2>&1; }
 
 # `apt-get update` fails as a whole if any single source 404s, and a dead
@@ -227,7 +277,11 @@ apt_update() {
 # Set/replace a key in a .env-style file, handling commented-out and missing keys.
 set_env() {
   local key="$1" val="$2" file="$3" esc
-  [[ "$val" =~ ^[A-Za-z0-9_./:@-]*$ ]] || val="\"$val\""
+  # Unquoted dotenv values cannot contain spaces or #; quoted ones must escape
+  # backslashes and double quotes. Connection strings and passwords hit both.
+  if [[ ! "$val" =~ ^[A-Za-z0-9_./:@-]*$ ]]; then
+    val="${val//\\/\\\\}"; val="${val//\"/\\\"}"; val="\"$val\""
+  fi
   esc=$(printf '%s' "$val" | sed -e 's/[\\|&]/\\&/g')
   if grep -qE "^[[:space:]]*#?[[:space:]]*${key}=" "$file"; then
     sed -i -E "s|^[[:space:]]*#?[[:space:]]*${key}=.*|${key}=${esc}|" "$file"
@@ -306,21 +360,72 @@ ask      APP_URL           "APP_URL" "http://localhost"
 ask      APP_DEBUG         "APP_DEBUG" "$( [[ "$APP_ENV" == "production" ]] && echo false || echo true )"
 ask_yn   EDIT_ENV_AFTER    "Open .env in an editor before finishing" "y"
 
-ask_yn   INSTALL_MYSQL     "Install MySQL server" "y"
-if [[ "$INSTALL_MYSQL" == "yes" ]]; then
-  ask_secret MYSQL_ROOT_PASSWORD "MySQL root password"
-  ask      DB_DATABASE     "Application database name" "${APP_DIR_NAME//[^A-Za-z0-9_]/_}"
-  ask      DB_USERNAME     "Application database user" "$DB_DATABASE"
-  ask_secret DB_PASSWORD   "Application database password"
-  ask_yn   INSTALL_PHPMYADMIN "Install phpMyAdmin" "n"
+# Laravel's default database config reads DATABASE_URL first and only falls back
+# to the individual DB_* keys, so a connection string is an either/or choice.
+ask_yn   USE_DATABASE_URL  "Configure the database with a single connection string (DATABASE_URL)" "n"
+
+if [[ "$USE_DATABASE_URL" == "yes" ]]; then
+  info "Format: driver://user:password@host:port/database (e.g. pgsql://app:secret@db.example.com:5432/app)"
+  ask_secret DATABASE_URL  "DATABASE_URL" "no"
+  DB_CONNECTION=$(url_scheme "$DATABASE_URL")
+  [[ -n "$DB_CONNECTION" ]] || die "Could not read a driver from the start of DATABASE_URL."
+  DB_CONNECTION=$(normalise_driver "$DB_CONNECTION")
+  ok "Driver from connection string: $DB_CONNECTION"
+  INSTALL_DB_SERVER="no"
+  INSTALL_MYSQL="no"
+  INSTALL_PHPMYADMIN="${INSTALL_PHPMYADMIN:-no}"
+  ask_yn INSTALL_PHPMYADMIN "Install phpMyAdmin" "n"
 else
-  INSTALL_PHPMYADMIN="${INSTALL_PHPMYADMIN:-no}"; ask_yn INSTALL_PHPMYADMIN "Install phpMyAdmin anyway" "n"
-  info "No MySQL install — these must match the database you already have."
-  ask      DB_HOST_INPUT   "DB_HOST for .env" "127.0.0.1"
-  ask      DB_DATABASE     "DB_DATABASE for .env" "laravel"
-  ask      DB_USERNAME     "DB_USERNAME for .env" "laravel"
-  ask_secret DB_PASSWORD   "DB_PASSWORD for .env" "no"
+  ask    DB_CONNECTION     "Database driver (mysql, mariadb, pgsql, sqlite)" "mysql"
+  DB_CONNECTION=$(normalise_driver "$DB_CONNECTION")
+  case "$DB_CONNECTION" in
+    mysql|mariadb|pgsql|sqlite|sqlsrv) ;;
+    *) die "Unsupported database driver: $DB_CONNECTION" ;;
+  esac
+
+  if [[ "$DB_CONNECTION" == "sqlite" ]]; then
+    INSTALL_DB_SERVER="no"; INSTALL_MYSQL="no"; INSTALL_PHPMYADMIN="no"
+    ask  DB_DATABASE       "SQLite file (absolute path)" "${WEB_ROOT%/}/${APP_DIR_NAME}/database/database.sqlite"
+    DB_USERNAME=""; DB_PASSWORD=""; DB_HOST=""; DB_PORT=""
+  else
+    case "$DB_CONNECTION" in
+      mysql|mariadb) ask_yn INSTALL_DB_SERVER "Install a $DB_CONNECTION server on this machine" "y" ;;
+      pgsql)         ask_yn INSTALL_DB_SERVER "Install a PostgreSQL server on this machine" "y" ;;
+      *)             INSTALL_DB_SERVER="no" ;;
+    esac
+
+    if [[ "$INSTALL_DB_SERVER" == "yes" ]]; then
+      [[ "$DB_CONNECTION" == "pgsql" ]] || ask_secret MYSQL_ROOT_PASSWORD "MySQL root password"
+      ask      DB_DATABASE   "Application database name" "${APP_DIR_NAME//[^A-Za-z0-9_]/_}"
+      ask      DB_USERNAME   "Application database user" "$DB_DATABASE"
+      ask_secret DB_PASSWORD "Application database password"
+      DB_HOST="${DB_HOST:-127.0.0.1}"
+    else
+      info "Using an existing $DB_CONNECTION server — these must match it."
+      ask      DB_HOST "DB_HOST" "127.0.0.1"
+      ask      DB_PORT "DB_PORT" "$(default_db_port "$DB_CONNECTION")"
+      ask      DB_DATABASE   "DB_DATABASE" "laravel"
+      ask      DB_USERNAME   "DB_USERNAME" "laravel"
+      ask_secret DB_PASSWORD "DB_PASSWORD" "no"
+    fi
+
+    # phpMyAdmin only understands MySQL/MariaDB.
+    if [[ "$DB_CONNECTION" == "pgsql" ]]; then
+      INSTALL_PHPMYADMIN="no"
+    else
+      ask_yn INSTALL_PHPMYADMIN "Install phpMyAdmin" "n"
+    fi
+  fi
+
+  # The MySQL provisioning block below keys off this.
+  if [[ "$INSTALL_DB_SERVER" == "yes" && ( "$DB_CONNECTION" == "mysql" || "$DB_CONNECTION" == "mariadb" ) ]]; then
+    INSTALL_MYSQL="yes"
+  else
+    INSTALL_MYSQL="no"
+  fi
 fi
+
+DB_PORT="${DB_PORT:-$(default_db_port "$DB_CONNECTION")}"
 
 ask_yn   INSTALL_NODE      "Install Node.js" "n"
 [[ "$INSTALL_NODE" == "yes" ]] && ask NODE_MAJOR "Node major version" "22"
@@ -552,6 +657,40 @@ SQL
   ok "MySQL ready — root auth: $AUTH_PLUGIN, database: $DB_DATABASE, user: $DB_USERNAME"
 fi
 
+# ---------------------------------------------------------------------------
+# 6b. PostgreSQL
+# ---------------------------------------------------------------------------
+
+if [[ "${INSTALL_DB_SERVER:-no}" == "yes" && "$DB_CONNECTION" == "pgsql" ]]; then
+  log "Installing PostgreSQL"
+  apt_install postgresql postgresql-contrib
+  sudo systemctl enable --now postgresql >>"$LOG_FILE" 2>&1
+
+  # Idempotent: CREATE ROLE/DATABASE have no IF NOT EXISTS in Postgres, so check
+  # the catalog first and only ALTER the password on a re-run.
+  if out_matches '1' sudo -u postgres psql -tAc \
+        "SELECT 1 FROM pg_roles WHERE rolname='${DB_USERNAME}'"; then
+    sudo -u postgres psql -q -c \
+      "ALTER ROLE \"${DB_USERNAME}\" WITH LOGIN PASSWORD '${DB_PASSWORD}'" >>"$LOG_FILE" 2>&1
+  else
+    sudo -u postgres psql -q -c \
+      "CREATE ROLE \"${DB_USERNAME}\" WITH LOGIN PASSWORD '${DB_PASSWORD}'" >>"$LOG_FILE" 2>&1
+  fi
+
+  if ! out_matches '1' sudo -u postgres psql -tAc \
+        "SELECT 1 FROM pg_database WHERE datname='${DB_DATABASE}'"; then
+    sudo -u postgres createdb -O "$DB_USERNAME" "$DB_DATABASE" >>"$LOG_FILE" 2>&1
+  fi
+  sudo -u postgres psql -q -c \
+    "GRANT ALL PRIVILEGES ON DATABASE \"${DB_DATABASE}\" TO \"${DB_USERNAME}\"" >>"$LOG_FILE" 2>&1
+  # Postgres 15+ locks down the public schema; without this the app cannot
+  # create tables even as the database owner.
+  sudo -u postgres psql -q -d "$DB_DATABASE" -c \
+    "GRANT ALL ON SCHEMA public TO \"${DB_USERNAME}\"" >>"$LOG_FILE" 2>&1 || true
+
+  ok "PostgreSQL ready — database: $DB_DATABASE, role: $DB_USERNAME, port: $(default_db_port pgsql)"
+fi
+
 if [[ "$INSTALL_PHPMYADMIN" == "yes" ]]; then
   log "Installing phpMyAdmin"
   sudo debconf-set-selections <<'SEL'
@@ -639,12 +778,26 @@ set_env APP_NAME    "$APP_NAME"    .env
 set_env APP_ENV     "$APP_ENV"     .env
 set_env APP_DEBUG   "$APP_DEBUG"   .env
 set_env APP_URL     "$APP_URL"     .env
-set_env DB_CONNECTION "mysql"      .env
-set_env DB_HOST     "${DB_HOST_INPUT:-127.0.0.1}" .env
-set_env DB_PORT     "3306"         .env
-set_env DB_DATABASE "$DB_DATABASE" .env
-set_env DB_USERNAME "$DB_USERNAME" .env
-set_env DB_PASSWORD "$DB_PASSWORD" .env
+if [[ "$USE_DATABASE_URL" == "yes" ]]; then
+  # DATABASE_URL wins over the individual keys in Laravel's default config, so
+  # writing both would leave two sources of truth that can silently disagree.
+  set_env DATABASE_URL  "$DATABASE_URL"  .env
+  set_env DB_CONNECTION "$DB_CONNECTION" .env
+  ok "Wrote DATABASE_URL (driver: $DB_CONNECTION)"
+elif [[ "$DB_CONNECTION" == "sqlite" ]]; then
+  set_env DB_CONNECTION "sqlite"      .env
+  set_env DB_DATABASE   "$DB_DATABASE" .env
+  mkdir -p "$(dirname "$DB_DATABASE")"
+  [[ -f "$DB_DATABASE" ]] || touch "$DB_DATABASE"
+  ok "SQLite database at $DB_DATABASE"
+else
+  set_env DB_CONNECTION "$DB_CONNECTION"   .env
+  set_env DB_HOST     "${DB_HOST:-127.0.0.1}" .env
+  set_env DB_PORT     "$DB_PORT"     .env
+  set_env DB_DATABASE "$DB_DATABASE"       .env
+  set_env DB_USERNAME "$DB_USERNAME"       .env
+  set_env DB_PASSWORD "$DB_PASSWORD"       .env
+fi
 ok "Application and database values written"
 
 # ---------------------------------------------------------------------------
@@ -702,6 +855,18 @@ apt_pkg_for_ext() {
 
 MISSING_EXT_PKGS=()
 UNAVAILABLE_EXTS=()
+
+# The PDO driver for the chosen connection. Laravel apps rarely declare
+# ext-pgsql in composer.json, so the scan below would not catch it.
+if driver_pkg=$(php_driver_pkg "$DB_CONNECTION"); then
+  if out_matches 'Candidate:[[:space:]]+[0-9]' apt-cache policy "$driver_pkg"; then
+    MISSING_EXT_PKGS+=("$driver_pkg")
+  else
+    warn "No apt package '$driver_pkg' for driver '$DB_CONNECTION'"
+  fi
+elif [[ "$DB_CONNECTION" == "sqlsrv" ]]; then
+  warn "sqlsrv has no apt package — install it with pecl before the app will connect"
+fi
 while read -r ext || [[ -n "$ext" ]]; do
   [[ -n "$ext" ]] || continue
   php -r "exit(extension_loaded('$ext') ? 0 : 1);" 2>/dev/null && continue

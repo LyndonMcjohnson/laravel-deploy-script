@@ -61,8 +61,9 @@ a hard error. A filled-in config contains database passwords — it's in
    official SHA-384 signature
 5. Git identity, plus an ed25519 SSH key — the public key is printed in full, and
    for an `ssh://` remote the script waits for you to add it to your Git host
-6. MySQL (optional): sets a root password, creates the app database and a
-   dedicated app user
+6. A database server (optional): MySQL/MariaDB, or PostgreSQL. Either way it
+   creates the app database and a dedicated app user. Skip it and point
+   `DB_HOST` at an existing server (RDS, a managed instance, another box)
 7. phpMyAdmin (optional), preseeded so `apt` doesn't prompt
 8. Node.js from NodeSource (optional)
 9. A swap file (optional), persisted in `/etc/fstab`
@@ -95,8 +96,18 @@ only the step checklist.
 - **MySQL auth.** `mysql_native_password` was removed in MySQL 8.4, so the
   script checks which plugins the server actually has active and falls back to
   `caching_sha2_password`.
-- **Database user.** The app gets its own MySQL user scoped to its own database.
-  The root password is set but never written into `.env`.
+- **Database user.** The app gets its own database user scoped to its own
+  database. The MySQL root password is set but never written into `.env`.
+- **Drivers.** `DB_CONNECTION` accepts `mysql`, `mariadb`, `pgsql` or `sqlite`.
+  The port defaults to the driver's (3306 / 5432) unless you set `DB_PORT`, and
+  the matching PDO extension (`php-mysql`, `php-pgsql`, `php-sqlite3`) is
+  installed — Laravel apps rarely declare `ext-pgsql` in `composer.json`, so the
+  composer scan would not catch it. On PostgreSQL 15+ the app role is granted
+  `ALL ON SCHEMA public`, without which migrations cannot create tables.
+- **Connection strings.** Set `USE_DATABASE_URL=yes` and give a
+  `driver://user:pass@host:port/database` URL. Laravel's default config reads
+  `DATABASE_URL` first and ignores the individual `DB_*` keys when it is
+  present, so the script writes one or the other, never both.
 - **Virtual host.** A dedicated file in `sites-available` with `AllowOverride
   All` scoped to the app's `public/` directory, rather than editing
   `000-default.conf` or loosening `apache2.conf` globally.
