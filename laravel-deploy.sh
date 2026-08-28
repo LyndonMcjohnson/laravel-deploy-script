@@ -137,14 +137,28 @@ ask() {  # ask VAR "Prompt" [default]
   printf -v "$var" '%s' "${reply:-$default}"
 }
 
-ask_secret() {  # ask_secret VAR "Prompt" — blank input generates a strong password
-  local var="$1" prompt="$2" reply
+# ask_secret VAR "Prompt" [generate]
+#   generate=yes (default): blank input creates a strong password. Only correct
+#   when this script is the thing creating the account.
+#   generate=no: the credential already exists elsewhere, so a generated value
+#   would be silently wrong — keep asking until we get one.
+ask_secret() {
+  local var="$1" prompt="$2" generate="${3:-yes}" reply
   if [[ -n "${!var:-}" ]]; then return 0; fi
   if [[ "$NON_INTERACTIVE" == "yes" ]]; then
+    [[ "$generate" == "yes" ]] || die "Missing required value '$var' (non-interactive mode)"
     printf -v "$var" '%s' "$(gen_password)"; return 0
   fi
-  read -rsp "  $prompt (blank = generate one): " reply || true; echo
-  printf -v "$var" '%s' "${reply:-$(gen_password)}"
+  if [[ "$generate" == "yes" ]]; then
+    read -rsp "  $prompt (blank = generate one): " reply || true; echo
+    printf -v "$var" '%s' "${reply:-$(gen_password)}"
+  else
+    while [[ -z "${reply:-}" ]]; do
+      read -rsp "  $prompt: " reply || true; echo
+      [[ -n "${reply:-}" ]] || warn "This database already exists, so there is nothing to generate — enter its password."
+    done
+    printf -v "$var" '%s' "$reply"
+  fi
 }
 
 ask_yn() {  # ask_yn VAR "Prompt" [y|n]
@@ -286,9 +300,11 @@ if [[ "$INSTALL_MYSQL" == "yes" ]]; then
   ask_yn   INSTALL_PHPMYADMIN "Install phpMyAdmin" "n"
 else
   INSTALL_PHPMYADMIN="${INSTALL_PHPMYADMIN:-no}"; ask_yn INSTALL_PHPMYADMIN "Install phpMyAdmin anyway" "n"
+  info "No MySQL install — these must match the database you already have."
+  ask      DB_HOST_INPUT   "DB_HOST for .env" "127.0.0.1"
   ask      DB_DATABASE     "DB_DATABASE for .env" "laravel"
   ask      DB_USERNAME     "DB_USERNAME for .env" "laravel"
-  ask_secret DB_PASSWORD   "DB_PASSWORD for .env"
+  ask_secret DB_PASSWORD   "DB_PASSWORD for .env" "no"
 fi
 
 ask_yn   INSTALL_NODE      "Install Node.js" "n"
@@ -585,7 +601,7 @@ set_env APP_ENV     "$APP_ENV"     .env
 set_env APP_DEBUG   "$APP_DEBUG"   .env
 set_env APP_URL     "$APP_URL"     .env
 set_env DB_CONNECTION "mysql"      .env
-set_env DB_HOST     "127.0.0.1"    .env
+set_env DB_HOST     "${DB_HOST_INPUT:-127.0.0.1}" .env
 set_env DB_PORT     "3306"         .env
 set_env DB_DATABASE "$DB_DATABASE" .env
 set_env DB_USERNAME "$DB_USERNAME" .env
