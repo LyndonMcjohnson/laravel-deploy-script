@@ -109,6 +109,11 @@ DB_PASSWORD=                  # generated when INSTALL_DB_SERVER=yes; required o
 MYSQL_ROOT_PASSWORD=          # mysql/mariadb only; blank = generated and printed at the end
 INSTALL_PHPMYADMIN=no         # mysql/mariadb only
 
+# --- Firewall ---------------------------------------------------------------
+CONFIGURE_FIREWALL=yes
+SSH_ALLOW_FROM=any            # an IP or CIDR locks SSH to it; 'any' leaves it
+                              # open to the world but rate-limited
+
 # --- Swap -------------------------------------------------------------------
 CREATE_SWAP=yes
 SWAP_SIZE_MB=2048
@@ -442,6 +447,11 @@ fi
 ask_yn   COMPOSER_NO_DEV   "composer install without dev dependencies" "$( [[ "$APP_ENV" == "production" ]] && echo y || echo n )"
 ask_yn   RUN_MIGRATIONS    "Run php artisan migrate --force after install" "n"
 ask_yn   RUN_STORAGE_LINK  "Run php artisan storage:link" "y"
+ask_yn   CONFIGURE_FIREWALL "Configure a ufw firewall (SSH + 80 + 443)" "y"
+if [[ "$CONFIGURE_FIREWALL" == "yes" ]]; then
+  ask SSH_ALLOW_FROM "Restrict SSH to which IP/CIDR ('any' for no restriction)" "any"
+fi
+SSH_ALLOW_FROM="${SSH_ALLOW_FROM:-any}"
 ask_yn   BUILD_ASSETS      "Build front-end assets with npm if the repo has a package.json" "y"
 
 APP_DIR="${WEB_ROOT%/}/${APP_DIR_NAME}"
@@ -1046,7 +1056,72 @@ if [[ "$INSTALL_SSL" == "yes" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 14. Final review + summary
+# 14. Firewall
+# ---------------------------------------------------------------------------
+#
+# Runs last, after certbot has finished with port 80. Enabling a default-deny
+# firewall on a remote box without a working SSH rule locks you out for good, so
+# every step here is ordered around not doing that: detect the port sshd is
+# really on, add the rule, PROVE the rule exists, and only then enable.
+
+if [[ "$CONFIGURE_FIREWALL" == "yes" ]]; then
+  log "Configuring the firewall"
+  apt_install ufw
+
+  detect_ssh_port() {
+    local p="" cfg line
+    # The port of the connection you are sitting on — the most trustworthy
+    # source, since it is demonstrably working right now.
+    if [[ -n "${SSH_CONNECTION:-}" ]]; then
+      p=$(awk '{print $4}' <<<"$SSH_CONNECTION")
+    fi
+    # sshd's own resolved config, which accounts for drop-ins under sshd_config.d.
+    if [[ ! "$p" =~ ^[0-9]+$ ]]; then
+      cfg=$(sudo sshd -T 2>/dev/null) || cfg=""
+      p=$(awk '$1=="port"{print $2}' <<<"$cfg" | tail -1)
+    fi
+    if [[ ! "$p" =~ ^[0-9]+$ ]]; then
+      line=$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | tail -1) || true
+      p=$(awk '{print $2}' <<<"$line")
+    fi
+    [[ "$p" =~ ^[0-9]+$ ]] || p=22
+    printf '%s' "$p"
+  }
+
+  SSH_PORT=$(detect_ssh_port)
+  ok "SSH detected on port $SSH_PORT"
+
+  sudo ufw default deny incoming  >>"$LOG_FILE" 2>&1
+  sudo ufw default allow outgoing >>"$LOG_FILE" 2>&1
+
+  if [[ -n "$SSH_ALLOW_FROM" && "$SSH_ALLOW_FROM" != "any" ]]; then
+    sudo ufw allow from "$SSH_ALLOW_FROM" to any port "$SSH_PORT" proto tcp >>"$LOG_FILE" 2>&1
+    info "SSH restricted to $SSH_ALLOW_FROM"
+  else
+    # Open to the world, so rate-limit it: ufw drops a source making more than
+    # 6 connections in 30 seconds.
+    sudo ufw limit "${SSH_PORT}/tcp" >>"$LOG_FILE" 2>&1
+    info "SSH open to all sources, rate-limited"
+  fi
+
+  sudo ufw allow 80/tcp  >>"$LOG_FILE" 2>&1
+  sudo ufw allow 443/tcp >>"$LOG_FILE" 2>&1
+
+  # Do not enable unless the SSH rule is really there.
+  if ! out_matches "(^|[^0-9])${SSH_PORT}(/|[[:space:]]|$)" sudo ufw show added; then
+    die "Refusing to enable the firewall: no SSH rule for port $SSH_PORT was added. Nothing was enabled."
+  fi
+
+  sudo ufw --force enable >>"$LOG_FILE" 2>&1
+  ok "Firewall active — $SSH_PORT/tcp (SSH), 80/tcp, 443/tcp"
+  info "Your current SSH session stays up; ufw permits established connections."
+  if [[ -n "${SERVER_IP:-}" ]]; then
+    info "On a cloud host the provider's own firewall still applies independently."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 15. Final review + summary
 # ---------------------------------------------------------------------------
 
 if [[ "$EDIT_ENV_AFTER" == "yes" && "$NON_INTERACTIVE" != "yes" ]]; then

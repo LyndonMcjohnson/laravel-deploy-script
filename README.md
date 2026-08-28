@@ -81,7 +81,9 @@ a hard error. A filled-in config contains database passwords — it's in
     the restart
 15. certbot via snap and a certificate (optional), including the manual DNS
     challenge path for wildcard domains
-16. Production config/route/view caches, and a summary of every generated
+16. A `ufw` firewall (optional): SSH on its detected port, plus 80 and 443.
+    Runs last, once certbot is done with port 80
+17. Production config/route/view caches, and a summary of every generated
     credential
 
 Verbose output goes to `/tmp/laravel-deploy-<timestamp>.log`; the console shows
@@ -116,6 +118,15 @@ only the step checklist.
   permissions pass. Without it there is no `public/build/manifest.json` and a
   Vite app answers every request with "Unable to locate file in Vite manifest",
   which reads like a PHP fault. Set `BUILD_ASSETS=no` to skip.
+- **Firewall.** `ufw` defaults to deny-incoming and allows only SSH, 80 and 443.
+  The SSH port is detected from your live session (`SSH_CONNECTION`), falling
+  back to `sshd -T` and then `sshd_config`, and the script refuses to enable
+  anything unless it can prove the SSH rule was added — enabling a default-deny
+  firewall without one locks you out of a remote box permanently. Set
+  `SSH_ALLOW_FROM` to an IP or CIDR to restrict SSH to it; left as `any`, SSH
+  stays open but rate-limited to 6 connections per 30 seconds per source.
+  On a cloud host your provider's own firewall (an EC2 security group, say)
+  still applies independently — this does not replace it.
 - **Generated passwords.** Blank password prompts generate 24 alphanumeric
   characters and print them once, in the closing summary. Save them then.
 

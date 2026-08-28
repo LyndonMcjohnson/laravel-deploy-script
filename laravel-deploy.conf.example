@@ -50,6 +50,11 @@ DB_PASSWORD=                  # generated when INSTALL_DB_SERVER=yes; required o
 MYSQL_ROOT_PASSWORD=          # mysql/mariadb only; blank = generated and printed at the end
 INSTALL_PHPMYADMIN=no         # mysql/mariadb only
 
+# --- Firewall ---------------------------------------------------------------
+CONFIGURE_FIREWALL=yes
+SSH_ALLOW_FROM=any            # an IP or CIDR locks SSH to it; 'any' leaves it
+                              # open to the world but rate-limited
+
 # --- Swap -------------------------------------------------------------------
 CREATE_SWAP=yes
 SWAP_SIZE_MB=2048
