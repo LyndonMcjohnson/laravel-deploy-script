@@ -136,8 +136,42 @@ if [[ "${DUMP_CONFIG:-no}" == "yes" ]]; then dump_config; exit 0; fi
 if [[ -z "$CONFIG_FILE" && -f ./laravel-deploy.conf ]]; then
   CONFIG_FILE=./laravel-deploy.conf
 fi
+# The config is sourced as shell, which makes a typo behave like a command:
+# `DB_USERNAME= postgres` sets the variable empty and then runs `postgres`.
+# Check the shape of every line first so the error names the problem.
+validate_config() {
+  local file="$1" n=0 line val
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$((n + 1))
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      die "$file line $n is not a KEY=value setting:
+    $line"
+    fi
+
+    val="${line#*=}"
+    val="${val%%[[:space:]]#*}"                     # drop a trailing comment
+    val="${val%"${val##*[![:space:]]}"}"            # drop trailing whitespace
+
+    if [[ "$val" =~ ^[[:space:]] ]]; then
+      die "$file line $n has a space after '=', so the shell runs the rest as a command:
+    $line
+    Write it with no space: ${line%%=*}=${val# }"
+    fi
+
+    if [[ "$val" != \"*\" && "$val" != \'*\' && "$val" == *" "* ]]; then
+      die "$file line $n has an unquoted value containing a space:
+    $line
+    Quote it: ${line%%=*}=\"$val\""
+    fi
+  done < "$file"
+}
+
 if [[ -n "$CONFIG_FILE" ]]; then
   [[ -f "$CONFIG_FILE" ]] || die "Config file not found: $CONFIG_FILE"
+  validate_config "$CONFIG_FILE"
   # shellcheck disable=SC1090
   set -a; source "$CONFIG_FILE"; set +a
   # Configs written before multi-driver support say INSTALL_MYSQL; honour it.
