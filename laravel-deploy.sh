@@ -115,6 +115,15 @@ DB_PASSWORD=                  # generated when INSTALL_DB_SERVER=yes; required o
 MYSQL_ROOT_PASSWORD=          # mysql/mariadb only; blank = generated and printed at the end
 INSTALL_PHPMYADMIN=no         # mysql/mariadb only
 
+# --- Queue workers ----------------------------------------------------------
+INSTALL_QUEUE_WORKER=yes
+QUEUE_CONNECTION=database     # database | redis | sqs | beanstalkd
+QUEUE_WORKERS=2               # supervisor numprocs
+QUEUE_TRIES=3                 # --tries
+QUEUE_TIMEOUT=60              # --timeout; keep below your queue retry_after
+QUEUE_MAX_TIME=3600           # --max-time, worker recycles itself after this
+QUEUE_STOPWAIT=               # blank = timeout + 30; must exceed QUEUE_TIMEOUT
+
 # --- Firewall ---------------------------------------------------------------
 CONFIGURE_FIREWALL=yes
 SSH_ALLOW_FROM=any            # an IP or CIDR locks SSH to it; 'any' leaves it
@@ -579,6 +588,24 @@ fi
 ask_yn   COMPOSER_NO_DEV   "composer install without dev dependencies" "$( [[ "$APP_ENV" == "production" ]] && echo y || echo n )"
 ask_yn   RUN_MIGRATIONS    "Run php artisan migrate --force after install" "n"
 ask_yn   RUN_STORAGE_LINK  "Run php artisan storage:link" "y"
+ask_yn   INSTALL_QUEUE_WORKER "Run queue workers under Supervisor" "y"
+if [[ "$INSTALL_QUEUE_WORKER" == "yes" ]]; then
+  ask    QUEUE_CONNECTION  "QUEUE_CONNECTION (database, redis, sqs, beanstalkd)" "database"
+  if [[ "$QUEUE_CONNECTION" == "sync" ]]; then
+    warn "QUEUE_CONNECTION=sync runs jobs inline — workers would have nothing to do."
+    INSTALL_QUEUE_WORKER="no"
+  else
+    ask  QUEUE_WORKERS     "How many worker processes" "2"
+    ask  QUEUE_TRIES       "Attempts before a job is marked failed (--tries)" "3"
+    ask  QUEUE_TIMEOUT     "Seconds a single job may run (--timeout)" "60"
+    ask  QUEUE_MAX_TIME    "Seconds before a worker restarts itself (--max-time)" "3600"
+    # Supervisor sends SIGTERM then waits stopwaitsecs before SIGKILL. Shorter
+    # than the job timeout and it kills jobs mid-flight, which the Laravel docs
+    # call out explicitly.
+    QUEUE_STOPWAIT="${QUEUE_STOPWAIT:-$(( QUEUE_TIMEOUT + 30 ))}"
+  fi
+fi
+
 ask_yn   CONFIGURE_FIREWALL "Configure a ufw firewall (SSH + 80 + 443)" "y"
 if [[ "$CONFIGURE_FIREWALL" == "yes" ]]; then
   ask SSH_ALLOW_FROM "Restrict SSH to which IP/CIDR ('any' for no restriction)" "any"
@@ -1143,6 +1170,62 @@ sudo systemctl restart apache2
 ok "Serving ${APP_DIR}/public as $PRIMARY_DOMAIN"
 
 # ---------------------------------------------------------------------------
+# 13b. Queue workers under Supervisor
+# ---------------------------------------------------------------------------
+#
+# Layout follows the Supervisor block in the Laravel queue documentation.
+
+if [[ "$INSTALL_QUEUE_WORKER" == "yes" ]]; then
+  log "Setting up queue workers"
+
+  [[ "$QUEUE_STOPWAIT" -gt "$QUEUE_TIMEOUT" ]] || \
+    die "QUEUE_STOPWAIT ($QUEUE_STOPWAIT) must exceed QUEUE_TIMEOUT ($QUEUE_TIMEOUT), or Supervisor kills jobs mid-flight."
+
+  apt_install supervisor
+  sudo systemctl enable --now supervisor >>"$LOG_FILE" 2>&1
+
+  set_env QUEUE_CONNECTION "$QUEUE_CONNECTION" .env
+
+  # The database driver needs its jobs table. Laravel 11+ ships the migration,
+  # but nothing creates the table unless migrations actually run.
+  if [[ "$QUEUE_CONNECTION" == "database" && "$RUN_MIGRATIONS" != "yes" ]]; then
+    warn "QUEUE_CONNECTION=database needs the 'jobs' table — run 'php artisan migrate' or workers will fail on every poll."
+  fi
+
+  QUEUE_PROGRAM="${APP_DIR_NAME}-worker"
+  sudo tee "/etc/supervisor/conf.d/${QUEUE_PROGRAM}.conf" >/dev/null <<SUPERVISORCONF
+[program:${QUEUE_PROGRAM}]
+process_name=%(program_name)s_%(process_num)02d
+command=$(command -v php) ${APP_DIR}/artisan queue:work ${QUEUE_CONNECTION} --sleep=3 --tries=${QUEUE_TRIES} --timeout=${QUEUE_TIMEOUT} --max-time=${QUEUE_MAX_TIME}
+directory=${APP_DIR}
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+user=${USER}
+numprocs=${QUEUE_WORKERS}
+redirect_stderr=true
+stdout_logfile=${APP_DIR}/storage/logs/worker.log
+stopwaitsecs=${QUEUE_STOPWAIT}
+SUPERVISORCONF
+
+  sudo supervisorctl reread >>"$LOG_FILE" 2>&1
+  sudo supervisorctl update >>"$LOG_FILE" 2>&1
+  sudo supervisorctl start "${QUEUE_PROGRAM}:*" >>"$LOG_FILE" 2>&1 || true
+
+  # supervisorctl reports success even when a program is immediately dying, so
+  # look at the actual state rather than the exit code.
+  sleep 2
+  if out_matches 'RUNNING' sudo supervisorctl status "${QUEUE_PROGRAM}:*"; then
+    ok "$QUEUE_WORKERS worker(s) running as '$QUEUE_PROGRAM' on the '$QUEUE_CONNECTION' queue"
+  else
+    warn "Workers are not RUNNING. Current state:"
+    sudo supervisorctl status "${QUEUE_PROGRAM}:*" 2>&1 | sed 's/^/      /' || true
+    warn "Check ${APP_DIR}/storage/logs/worker.log"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 13. TLS
 # ---------------------------------------------------------------------------
 
@@ -1267,6 +1350,13 @@ if [[ "$APP_ENV" == "production" ]]; then
   php artisan route:cache  >>"$LOG_FILE" 2>&1 || true
   php artisan view:cache   >>"$LOG_FILE" 2>&1 || true
   ok "Production caches warmed"
+fi
+
+# Documented deploy step: workers hold the old code in memory, so they must be
+# told to exit gracefully and be respawned by Supervisor.
+if [[ "$INSTALL_QUEUE_WORKER" == "yes" ]]; then
+  php artisan queue:restart >>"$LOG_FILE" 2>&1 || warn "queue:restart failed"
+  ok "Queue workers signalled to reload"
 fi
 
 echo

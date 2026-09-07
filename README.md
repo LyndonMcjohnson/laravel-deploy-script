@@ -101,11 +101,13 @@ a hard error. A filled-in config contains database passwords — it's in
     `storage:link` and `migrate --force`
 14. A dedicated Apache virtual host pointed at `public/`, config-tested before
     the restart
-15. certbot via snap and a certificate (optional), including the manual DNS
+15. Queue workers under Supervisor (optional), laid out as the Laravel queue
+    docs describe, and verified to reach RUNNING
+16. certbot via snap and a certificate (optional), including the manual DNS
     challenge path for wildcard domains
-16. A `ufw` firewall (optional): SSH on its detected port, plus 80 and 443.
+17. A `ufw` firewall (optional): SSH on its detected port, plus 80 and 443.
     Runs last, once certbot is done with port 80
-17. Production config/route/view caches, and a summary of every generated
+18. Production config/route/view caches, and a summary of every generated
     credential
 
 Verbose output goes to `/tmp/laravel-deploy-<timestamp>.log`; the console shows
@@ -149,6 +151,15 @@ only the step checklist.
   stays open but rate-limited to 6 connections per 30 seconds per source.
   On a cloud host your provider's own firewall (an EC2 security group, say)
   still applies independently — this does not replace it.
+- **Queue workers.** `supervisor` runs `queue:work` with `numprocs` from
+  `QUEUE_WORKERS`, and the script checks the program actually reaches `RUNNING`
+  rather than trusting `supervisorctl start`, which returns success even for a
+  process that dies immediately. `stopwaitsecs` defaults to `QUEUE_TIMEOUT + 30`
+  and the run aborts if you configure it lower — Supervisor sends SIGTERM then
+  SIGKILL after that window, so a shorter value kills jobs mid-flight. Deploys
+  end with `php artisan queue:restart`, since workers hold the old code in
+  memory until told to exit. With `QUEUE_CONNECTION=database` the `jobs` table
+  must exist, so the script warns when migrations are turned off.
 - **Generated passwords.** Blank password prompts generate 24 alphanumeric
   characters and print them once, in the closing summary. Save them then.
 

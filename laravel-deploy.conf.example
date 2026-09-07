@@ -50,6 +50,15 @@ DB_PASSWORD=                  # generated when INSTALL_DB_SERVER=yes; required o
 MYSQL_ROOT_PASSWORD=          # mysql/mariadb only; blank = generated and printed at the end
 INSTALL_PHPMYADMIN=no         # mysql/mariadb only
 
+# --- Queue workers ----------------------------------------------------------
+INSTALL_QUEUE_WORKER=yes
+QUEUE_CONNECTION=database     # database | redis | sqs | beanstalkd
+QUEUE_WORKERS=2               # supervisor numprocs
+QUEUE_TRIES=3                 # --tries
+QUEUE_TIMEOUT=60              # --timeout; keep below your queue retry_after
+QUEUE_MAX_TIME=3600           # --max-time, worker recycles itself after this
+QUEUE_STOPWAIT=               # blank = timeout + 30; must exceed QUEUE_TIMEOUT
+
 # --- Firewall ---------------------------------------------------------------
 CONFIGURE_FIREWALL=yes
 SSH_ALLOW_FROM=any            # an IP or CIDR locks SSH to it; 'any' leaves it
