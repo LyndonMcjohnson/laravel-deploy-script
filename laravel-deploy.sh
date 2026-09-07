@@ -124,6 +124,13 @@ QUEUE_TIMEOUT=60              # --timeout; keep below your queue retry_after
 QUEUE_MAX_TIME=3600           # --max-time, worker recycles itself after this
 QUEUE_STOPWAIT=               # blank = timeout + 30; must exceed QUEUE_TIMEOUT
 
+# --- Redis ------------------------------------------------------------------
+INSTALL_REDIS=no              # local server, bound to loopback only
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+REDIS_FOR_CACHE=no            # point CACHE_STORE/CACHE_DRIVER at redis
+REDIS_FOR_SESSION=no          # point SESSION_DRIVER at redis (logs everyone out)
+
 # --- Firewall ---------------------------------------------------------------
 CONFIGURE_FIREWALL=yes
 SSH_ALLOW_FROM=any            # an IP or CIDR locks SSH to it; 'any' leaves it
@@ -606,6 +613,27 @@ if [[ "$INSTALL_QUEUE_WORKER" == "yes" ]]; then
   fi
 fi
 
+# Redis may be wanted for the cache alone, so it is asked independently of the
+# queue driver — but a redis queue with no server is a guaranteed failure, so
+# default to yes in that case.
+ask_yn   INSTALL_REDIS "Install a local Redis server" \
+         "$( [[ "${QUEUE_CONNECTION:-}" == "redis" ]] && echo y || echo n )"
+if [[ "$INSTALL_REDIS" == "yes" || "${QUEUE_CONNECTION:-}" == "redis" ]]; then
+  ask    REDIS_HOST     "REDIS_HOST" "127.0.0.1"
+  ask    REDIS_PORT     "REDIS_PORT" "6379"
+  ask_yn REDIS_FOR_CACHE   "Use Redis for the cache as well" "n"
+  # Switching the session driver logs every signed-in user out, so this is not
+  # something to turn on by accident.
+  ask_yn REDIS_FOR_SESSION "Use Redis for sessions as well (logs everyone out)" "n"
+fi
+REDIS_FOR_CACHE="${REDIS_FOR_CACHE:-no}"
+REDIS_FOR_SESSION="${REDIS_FOR_SESSION:-no}"
+if [[ "${QUEUE_CONNECTION:-}" == "redis" && "$INSTALL_REDIS" == "no" \
+      && "${REDIS_HOST:-127.0.0.1}" == "127.0.0.1" ]]; then
+  warn "Queue driver is redis, no local server is being installed, and REDIS_HOST is localhost —"
+  warn "workers will fail unless a Redis is already running on this machine."
+fi
+
 ask_yn   CONFIGURE_FIREWALL "Configure a ufw firewall (SSH + 80 + 443)" "y"
 if [[ "$CONFIGURE_FIREWALL" == "yes" ]]; then
   ask SSH_ALLOW_FROM "Restrict SSH to which IP/CIDR ('any' for no restriction)" "any"
@@ -860,6 +888,60 @@ if [[ "${INSTALL_DB_SERVER:-no}" == "yes" && "$DB_CONNECTION" == "pgsql" ]]; the
   ok "PostgreSQL ready — database: $DB_DATABASE, role: $DB_USERNAME, port: $(default_db_port pgsql)"
 fi
 
+# ---------------------------------------------------------------------------
+# 6c. Redis
+# ---------------------------------------------------------------------------
+
+if [[ "$INSTALL_REDIS" == "yes" ]]; then
+  log "Installing Redis"
+  apt_install redis-server "php${PHP_VERSION}-redis"
+
+  # An internet-reachable Redis is found and abused within hours — 6379 is one
+  # of the most heavily scanned ports there is, and an unauthenticated Redis
+  # gives an attacker arbitrary file writes. Pin it to loopback explicitly
+  # rather than trusting the packaged default.
+  # Rewrite only directives that are already ACTIVE. The shipped redis.conf
+  # carries commented examples ("# bind * -::*"), and a pattern that also
+  # matches '#' would uncomment those, leaving several conflicting bind lines.
+  # '-::1' keeps the leading dash so Redis still starts on a host with no IPv6.
+  REDIS_CONF=/etc/redis/redis.conf
+  if [[ -f "$REDIS_CONF" ]]; then
+    if grep -qE '^[[:space:]]*bind[[:space:]]' "$REDIS_CONF"; then
+      sudo sed -i -E 's/^[[:space:]]*bind[[:space:]].*/bind 127.0.0.1 -::1/' "$REDIS_CONF"
+    else
+      echo 'bind 127.0.0.1 -::1' | sudo tee -a "$REDIS_CONF" >/dev/null
+    fi
+    if grep -qE '^[[:space:]]*protected-mode[[:space:]]' "$REDIS_CONF"; then
+      sudo sed -i -E 's/^[[:space:]]*protected-mode[[:space:]].*/protected-mode yes/' "$REDIS_CONF"
+    else
+      echo 'protected-mode yes' | sudo tee -a "$REDIS_CONF" >/dev/null
+    fi
+  else
+    warn "$REDIS_CONF not found — cannot confirm Redis is bound to loopback."
+  fi
+
+  sudo systemctl enable redis-server >>"$LOG_FILE" 2>&1
+  sudo systemctl restart redis-server >>"$LOG_FILE" 2>&1
+  sleep 1
+
+  if out_matches 'PONG' redis-cli -h 127.0.0.1 -p "$REDIS_PORT" ping; then
+    ok "Redis responding on 127.0.0.1:$REDIS_PORT"
+  else
+    warn "Redis did not answer PING — check 'systemctl status redis-server'"
+  fi
+
+  # Prove it is not listening on a public address before moving on. Without ss
+  # there is no evidence either way, so say so rather than implying it passed.
+  if ! command -v ss >/dev/null 2>&1; then
+    warn "'ss' unavailable — could not verify which address Redis is bound to."
+  elif out_matches '(0\.0\.0\.0|\*):'"$REDIS_PORT" ss -tln; then
+    warn "Redis appears to be listening on all interfaces. Fix 'bind' in $REDIS_CONF"
+    warn "and restart it before this server is exposed."
+  else
+    ok "Redis bound to loopback only"
+  fi
+fi
+
 if [[ "$INSTALL_PHPMYADMIN" == "yes" ]]; then
   log "Installing phpMyAdmin"
   sudo debconf-set-selections <<'SEL'
@@ -968,6 +1050,28 @@ else
   set_env DB_PASSWORD "$DB_PASSWORD"       .env
 fi
 ok "Application and database values written"
+
+if [[ "$INSTALL_REDIS" == "yes" || "${QUEUE_CONNECTION:-}" == "redis" \
+      || "$REDIS_FOR_CACHE" == "yes" || "$REDIS_FOR_SESSION" == "yes" ]]; then
+  set_env REDIS_CLIENT "phpredis" .env
+  set_env REDIS_HOST   "${REDIS_HOST:-127.0.0.1}" .env
+  set_env REDIS_PORT   "${REDIS_PORT:-6379}" .env
+
+  # Laravel 11 renamed CACHE_DRIVER to CACHE_STORE. Write whichever key this
+  # app's .env actually uses, so the setting is not silently ignored.
+  if [[ "$REDIS_FOR_CACHE" == "yes" ]]; then
+    if grep -qE '^[[:space:]]*#?[[:space:]]*CACHE_STORE=' .env; then
+      set_env CACHE_STORE "redis" .env
+    else
+      set_env CACHE_DRIVER "redis" .env
+    fi
+    ok "Cache switched to Redis"
+  fi
+  if [[ "$REDIS_FOR_SESSION" == "yes" ]]; then
+    set_env SESSION_DRIVER "redis" .env
+    ok "Sessions switched to Redis — existing sessions are invalidated"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 11. PHP extensions this particular app needs

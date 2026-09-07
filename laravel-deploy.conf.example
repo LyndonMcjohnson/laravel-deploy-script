@@ -59,6 +59,13 @@ QUEUE_TIMEOUT=60              # --timeout; keep below your queue retry_after
 QUEUE_MAX_TIME=3600           # --max-time, worker recycles itself after this
 QUEUE_STOPWAIT=               # blank = timeout + 30; must exceed QUEUE_TIMEOUT
 
+# --- Redis ------------------------------------------------------------------
+INSTALL_REDIS=no              # local server, bound to loopback only
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+REDIS_FOR_CACHE=no            # point CACHE_STORE/CACHE_DRIVER at redis
+REDIS_FOR_SESSION=no          # point SESSION_DRIVER at redis (logs everyone out)
+
 # --- Firewall ---------------------------------------------------------------
 CONFIGURE_FIREWALL=yes
 SSH_ALLOW_FROM=any            # an IP or CIDR locks SSH to it; 'any' leaves it

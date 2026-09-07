@@ -86,28 +86,29 @@ a hard error. A filled-in config contains database passwords — it's in
 6. A database server (optional): MySQL/MariaDB, or PostgreSQL. Either way it
    creates the app database and a dedicated app user. Skip it and point
    `DB_HOST` at an existing server (RDS, a managed instance, another box)
-7. phpMyAdmin (optional), preseeded so `apt` doesn't prompt
-8. Node.js from NodeSource (optional)
-9. A swap file (optional), persisted in `/etc/fstab`
-10. `git clone` into the web root — or `git pull` if the repo is already there
-11. `.env` from `.env.example`, with app and database values filled in; an
+7. Redis (optional), pinned to loopback and verified with a PING
+8. phpMyAdmin (optional), preseeded so `apt` doesn't prompt
+9. Node.js from NodeSource (optional)
+10. A swap file (optional), persisted in `/etc/fstab`
+11. `git clone` into the web root — or `git pull` if the repo is already there
+12. `.env` from `.env.example`, with app and database values filled in; an
     existing `.env` is backed up before it's touched
-12. PHP extensions the app actually declares — `ext-*` is read out of
+13. PHP extensions the app actually declares — `ext-*` is read out of
     `composer.json` and `composer.lock`, including transitive requires, and the
     matching apt packages are installed
-13. `composer install`, `php artisan key:generate`, then `npm ci` and
+14. `composer install`, `php artisan key:generate`, then `npm ci` and
     `npm run build` when the repo has a `package.json` (Node is installed
     automatically if it isn't already), permissions, and optionally
     `storage:link` and `migrate --force`
-14. A dedicated Apache virtual host pointed at `public/`, config-tested before
+15. A dedicated Apache virtual host pointed at `public/`, config-tested before
     the restart
-15. Queue workers under Supervisor (optional), laid out as the Laravel queue
+16. Queue workers under Supervisor (optional), laid out as the Laravel queue
     docs describe, and verified to reach RUNNING
-16. certbot via snap and a certificate (optional), including the manual DNS
+17. certbot via snap and a certificate (optional), including the manual DNS
     challenge path for wildcard domains
-17. A `ufw` firewall (optional): SSH on its detected port, plus 80 and 443.
+18. A `ufw` firewall (optional): SSH on its detected port, plus 80 and 443.
     Runs last, once certbot is done with port 80
-18. Production config/route/view caches, and a summary of every generated
+19. Production config/route/view caches, and a summary of every generated
     credential
 
 Verbose output goes to `/tmp/laravel-deploy-<timestamp>.log`; the console shows
@@ -160,6 +161,16 @@ only the step checklist.
   end with `php artisan queue:restart`, since workers hold the old code in
   memory until told to exit. With `QUEUE_CONNECTION=database` the `jobs` table
   must exist, so the script warns when migrations are turned off.
+- **Redis.** Optional, and installed alongside `php-redis`. The server is
+  pinned to `bind 127.0.0.1 -::1` with `protected-mode yes`, then the script
+  checks with `ss` that nothing is listening on a public address — an
+  internet-reachable Redis is found by scanners within hours and an
+  unauthenticated one hands an attacker arbitrary file writes. Only lines that
+  are already active directives get rewritten, so the commented examples in the
+  shipped `redis.conf` are left alone rather than being uncommented into
+  conflicting `bind` lines. `REDIS_FOR_CACHE` and `REDIS_FOR_SESSION` are
+  opt-in; the cache key is written as `CACHE_STORE` or `CACHE_DRIVER` depending
+  on which one the app's `.env` already uses, since Laravel 11 renamed it.
 - **Generated passwords.** Blank password prompts generate 24 alphanumeric
   characters and print them once, in the closing summary. Save them then.
 
