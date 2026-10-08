@@ -70,6 +70,16 @@ HOST="$(ask_required "Server host or IP")"
 PORT="$(ask "SSH port" "22")"
 DEPLOY_USER="$(ask "SSH user" "deploy")"
 
+if [[ "$DEPLOY_USER" == "root" ]]; then
+  echo
+  warn "You chose root. Think twice:"
+  echo "  - Anyone who gets this GitHub secret gets full control of the whole server."
+  echo "  - Deploy commands (composer, artisan) will create root-owned files in storage/ and"
+  echo "    bootstrap/cache, which the web server user can't write, so the site can start erroring."
+  echo "  - Safer: create a 'deploy' user first (laravel-deploy.sh in this folder does that)."
+  confirm "Continue with root anyway?" "N" || die "Aborted. Re-run with a non-root user."
+fi
+
 DEFAULT_KEY_NAME="$(basename "$REPO")-deploy-ci"
 KEY_NAME="$(ask "Deploy key name (stored in ~/.ssh)" "$DEFAULT_KEY_NAME")"
 KEY_PATH="$HOME/.ssh/$KEY_NAME"

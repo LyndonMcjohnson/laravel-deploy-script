@@ -8,6 +8,10 @@ phpMyAdmin, Node.js, a swap file and a Let's Encrypt certificate are optional
 prompts. It is safe to re-run: existing packages, keys, swap files and clones
 are detected and skipped rather than clobbered.
 
+A companion script, [`setup-github-cicd.sh`](#github-actions-cicd-setup), runs on
+your own computer afterwards and gives GitHub Actions the SSH access it needs to
+deploy to the server.
+
 ## Requirements
 
 - Ubuntu (tested on 24.04 and 26.04). PHP comes from the distro repos when they
@@ -113,6 +117,93 @@ a hard error. A filled-in config contains database passwords — it's in
 
 Verbose output goes to `/tmp/laravel-deploy-<timestamp>.log`; the console shows
 only the step checklist.
+
+## GitHub Actions CI/CD setup
+
+`setup-github-cicd.sh` is the other half of a deploy pipeline: once the server
+exists, it creates the SSH key and GitHub secrets a workflow needs to log in and
+deploy. It works for any project, not just Laravel. Run it **on your own
+computer**, not on the server.
+
+```bash
+cd path/to/your/project          # optional: makes the repo the default answer
+/path/to/deployment/setup-github-cicd.sh --dry-run   # preview, changes nothing
+/path/to/deployment/setup-github-cicd.sh             # for real
+```
+
+Requires `gh` (logged in with admin access to the repo), `ssh` and `ssh-keygen`.
+The server needs a non-root deploy user first — `laravel-deploy.sh
+--bootstrap-user deploy` creates one.
+
+### What it asks
+
+| Prompt | Default |
+| --- | --- |
+| GitHub repository (`owner/name`) | The repo of the current folder |
+| GitHub environment for the secrets | `Production` (blank = repository-level secrets) |
+| Server host or IP | — |
+| SSH port | `22` |
+| SSH user | `deploy` |
+| Deploy key name (stored in `~/.ssh`) | `<repo>-deploy-ci` |
+
+### What it does
+
+1. Creates the GitHub environment if it doesn't exist. On a private repo without
+   a paid plan, environments aren't available, so it offers repository-level
+   secrets instead.
+2. Generates a dedicated passphrase-less ed25519 key in `~/.ssh` — or reuses one
+   with the same name. A passphrase would be pointless, since Actions can't type it.
+3. Adds the public key to the server with `ssh-copy-id` (using your existing
+   password or key), then checks that the new key can log in. If the login still
+   fails it prints the public key to add by hand and asks before going on.
+4. Sets the secrets below. Names that already exist are listed and overwritten.
+5. Lets you add extra project secrets (API tokens and so on). Values are typed
+   hidden; nothing secret is ever printed.
+
+| Secret | Value |
+| --- | --- |
+| `DEPLOY_HOST` | Server host or IP |
+| `DEPLOY_USER` | SSH user |
+| `DEPLOY_KEY` | The private key |
+| `DEPLOY_PORT` | Only set when the port isn't 22 |
+
+### Using the secrets in a workflow
+
+The job's `environment:` must match the environment you chose, or it won't see
+the secrets:
+
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          # port: ${{ secrets.DEPLOY_PORT }}   # only if you use a non-standard port
+          script: |
+            cd /var/www/html/your-app
+            git pull origin main
+```
+
+### Notes
+
+- **Avoid `root` as the SSH user.** The script warns and defaults to aborting.
+  Anyone who obtains that secret gets full control of the server, and deploy
+  commands (`composer`, `artisan`) run as root leave root-owned files in
+  `storage/` and `bootstrap/cache` that the web server user can't write, which
+  breaks the site. Create a deploy user first.
+- **One key per project.** A dedicated key means a leaked secret can be revoked
+  without touching your own login.
+- **Re-running** with an existing key name reuses the key and overwrites the
+  secrets, so it is also how you rotate them.
+- **Never commit or share the private key** (the file in `~/.ssh` without
+  `.pub`). GitHub secrets can't be read back once set.
+- `--dry-run` still asks every question and makes read-only `gh` calls, but
+  creates no key, environment, server login or secret.
 
 ## Notes on the choices made here
 
